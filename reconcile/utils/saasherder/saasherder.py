@@ -1649,55 +1649,70 @@ class SaasHerder:  # pylint: disable=too-many-public-methods
         for rt in saas_file.resource_templates:
             for target in rt.targets:
                 try:
-                    if not target.image:
+                    if not target.image or not target.images:
                         continue
+
                     commit_sha = self._get_commit_sha(
                         url=rt.url,
                         ref=target.ref,
                         github=github,
                     )
                     desired_image_tag = commit_sha[: rt.hash_length or self.hash_length]
-                    # don't trigger if image doesn't exist
-                    image_registry = f"{target.image.org.instance.url}/{target.image.org.name}/{target.image.name}"
-                    image_uri = f"{image_registry}:{desired_image_tag}"
-                    image_auth = self._initiate_image_auth(saas_file)
-                    error_prefix = f"[{saas_file.name}/{rt.name}] {target.ref}:"
-                    error = self._check_image(
-                        image_uri, saas_file.image_patterns, image_auth, error_prefix
-                    )
-                    if error:
-                        continue
 
-                    trigger_spec = TriggerSpecContainerImage(
-                        saas_file_name=saas_file.name,
-                        env_name=target.namespace.environment.name,
-                        timeout=saas_file.timeout,
-                        pipelines_provider=saas_file.pipelines_provider,
-                        resource_template_name=rt.name,
-                        cluster_name=target.namespace.cluster.name,
-                        namespace_name=target.namespace.name,
-                        image=image_registry,
-                        state_content=desired_image_tag,
-                    )
-                    if self.include_trigger_trace:
-                        trigger_spec.reason = image_uri
-                    if not self.state:
-                        raise Exception("state is not initialized")
-                    current_image_tag = self.state.get(trigger_spec.state_key, None)
-                    # skip if there is no change in image tag
-                    if current_image_tag == desired_image_tag:
-                        continue
-                    # don't trigger if this is the first time
-                    # this target is being deployed.
-                    # that will be taken care of by
-                    # openshift-saas-deploy-trigger-configs
-                    if current_image_tag is None:
-                        # store the value to take over from now on
-                        if not dry_run:
-                            self.update_state(trigger_spec)
-                        continue
-                    # we finally found something we want to trigger on!
-                    trigger_specs.append(trigger_spec)
+                    target_images = []
+                    if target.images:
+                        target_images = target.images
+                    else:
+                        target_images = [target.image]
+
+                    target_trigger_specs = []
+                    # don't trigger if image doesn't exist
+                    for target_image in target_images:
+                        image_registry = f"{target_image.org.instance.url}/{target_image.org.name}/{target_image.name}"
+                        image_uri = f"{image_registry}:{desired_image_tag}"
+                        image_auth = self._initiate_image_auth(saas_file)
+                        error_prefix = f"[{saas_file.name}/{rt.name}] {target.ref}:"
+                        error = self._check_image(
+                            image_uri, saas_file.image_patterns, image_auth, error_prefix
+                        )
+                        if error:
+                            break
+
+                        trigger_spec = TriggerSpecContainerImage(
+                            saas_file_name=saas_file.name,
+                            env_name=target.namespace.environment.name,
+                            timeout=saas_file.timeout,
+                            pipelines_provider=saas_file.pipelines_provider,
+                            resource_template_name=rt.name,
+                            cluster_name=target.namespace.cluster.name,
+                            namespace_name=target.namespace.name,
+                            image=image_registry,
+                            state_content=desired_image_tag,
+                        )
+                        if self.include_trigger_trace:
+                            trigger_spec.reason = image_uri
+                        if not self.state:
+                            raise Exception("state is not initialized")
+                        current_image_tag = self.state.get(trigger_spec.state_key, None)
+                        # skip if there is no change in image tag
+                        if current_image_tag == desired_image_tag:
+                            continue
+                        # don't trigger if this is the first time
+                        # this target is being deployed.
+                        # that will be taken care of by
+                        # openshift-saas-deploy-trigger-configs
+                        if current_image_tag is None:
+                            # store the value to take over from now on
+                            if not dry_run:
+                                self.update_state(trigger_spec)
+                            continue
+                        # we finally found something we want to trigger on!
+                        target_trigger_specs.append(trigger_spec)
+
+                    # Only trigger if ALL images in the set generated triggers
+                    if len(target_trigger_specs) == len(target_images):
+                        trigger_specs.extend(target_trigger_specs)
+
                 except (GithubException, GitlabError):
                     logging.exception(
                         f"Skipping target {saas_file.name}:{rt.name}"
